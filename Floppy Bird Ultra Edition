@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>3D Floppy Bird Pro</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #005582; position: fixed; width: 100%; height: 100%; font-family: 'Segoe UI', Arial, sans-serif; }
+        canvas { display: block; touch-action: none; }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <script>
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        // --- AUDIO ENGINE ---
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        let isMuted = false;
+
+        function playSfx(fStart, fEnd, type, vol, duration = 0.1) {
+            if (isMuted) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = type;
+            osc.frequency.setValueAtTime(fStart, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(fEnd, audioCtx.currentTime + duration);
+            gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+            gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + duration);
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            osc.start(); osc.stop(audioCtx.currentTime + duration);
+        }
+
+        // --- GAME STATE ---
+        let birdY = canvas.height / 2, velocity = 0, gravity = 0.45, jump = -8;
+        let score = 0, highScore = localStorage.getItem("f3d_high") || 0;
+        let gameRunning = true, frame = 0, wingAngle = 0;
+        let pipes = [], clouds = [];
+
+        // UI Config
+        const muteBtn = { x: canvas.width - 70, y: 20, size: 50 };
+
+        // Generate 3D Clouds
+        for(let i=0; i<7; i++) {
+            clouds.push({ x: Math.random()*canvas.width, y: Math.random()*(canvas.height/2.5), s: 0.2 + Math.random()*0.5, size: 20 + Math.random()*20 });
+        }
+
+        // --- DRAWING FUNCTIONS ---
+
+        function draw3DCloud(x, y, size) {
+            ctx.save();
+            let grd = ctx.createLinearGradient(x, y - size, x, y + size);
+            grd.addColorStop(0, "#ffffff"); grd.addColorStop(1, "#cceeff");
+            ctx.fillStyle = grd;
+            const puffs = [[0,0], [22,-12], [45,-3], [35,12], [10,10]];
+            puffs.forEach(p => { ctx.beginPath(); ctx.arc(x + p[0], y + p[1], size, 0, 7); ctx.fill(); });
+            ctx.restore();
+        }
+
+        function draw3DPipe(x, y, h, isTop) {
+            let grd = ctx.createLinearGradient(x, 0, x + 85, 0);
+            grd.addColorStop(0, "#143000"); grd.addColorStop(0.3, "#7ed321"); grd.addColorStop(0.5, "#b8e986"); grd.addColorStop(1, "#143000");
+            ctx.fillStyle = grd;
+            if (isTop) {
+                ctx.fillRect(x, 0, 85, h); // Shaft
+                ctx.fillStyle = "black"; ctx.fillRect(x-5, h-35, 95, 35); // Rim Shadow
+                ctx.fillStyle = grd; ctx.fillRect(x-5, h-35, 95, 32); // Rim
+            } else {
+                ctx.fillRect(x, y, 85, canvas.height-y); // Shaft
+                ctx.fillStyle = "black"; ctx.fillRect(x-5, y, 95, 35); // Rim Shadow
+                ctx.fillStyle = grd; ctx.fillRect(x-5, y+3, 95, 32); // Rim
+            }
+        }
+
+        function drawFloppyBird(x, y, vel, rot) {
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(rot);
+
+            // 1. Tail (Physics Lag)
+            const tailLag = vel * 2.5;
+            ctx.fillStyle = "#f57f17"; ctx.strokeStyle = "black"; ctx.lineWidth = 1.5;
+            for(let i = -1; i <= 1; i++) {
+                ctx.save();
+                ctx.rotate((i * 0.25) + (tailLag + Math.sin(frame*0.2)*3) * 0.02);
+                ctx.beginPath(); ctx.ellipse(-24, i * 4, 12, 6, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+                ctx.restore();
+            }
+
+            // 2. Body (3D Sphere)
+            let bodyGrd = ctx.createRadialGradient(-8, -8, 2, 0, 0, 25);
+            bodyGrd.addColorStop(0, "#fffde7"); bodyGrd.addColorStop(0.5, "#fdd835"); bodyGrd.addColorStop(1, "#f57f17");
+            ctx.fillStyle = bodyGrd;
+            ctx.beginPath(); ctx.arc(0, 0, 23, 0, 7); ctx.fill(); ctx.stroke();
+
+            // 3. Floppy Jointed Wings
+            ctx.save();
+            ctx.translate(-6, 4); ctx.rotate(wingAngle);
+            ctx.fillStyle = "#fff176";
+            ctx.beginPath(); ctx.ellipse(-4, 3, 14, 9, 0.3, 0, 7); ctx.fill(); ctx.stroke();
+            ctx.beginPath(); ctx.ellipse(0, 0, 17, 11, 0, 0, 7); ctx.fill(); ctx.stroke();
+            ctx.restore();
+
+            // 4. Face
+            ctx.fillStyle = "white"; ctx.beginPath(); ctx.arc(12, -9, 8, 0, 7); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = "black"; ctx.beginPath(); ctx.arc(15, -9, 3.5, 0, 7); ctx.fill();
+            let beakGrd = ctx.createLinearGradient(18, 0, 36, 10);
+            beakGrd.addColorStop(0, "#e64a19"); beakGrd.addColorStop(1, "#bf360a");
+            ctx.fillStyle = beakGrd; ctx.beginPath(); ctx.moveTo(18, -4); ctx.lineTo(38, 5); ctx.lineTo(18, 14); ctx.closePath(); ctx.fill(); ctx.stroke();
+            ctx.restore();
+        }
+
+        // --- CORE LOOP ---
+
+        function loop() {
+            if (!gameRunning) return;
+            frame++;
+            
+            // Sky Gradient
+            let bg = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            bg.addColorStop(0, "#005582"); bg.addColorStop(1, "#00b4db");
+            ctx.fillStyle = bg; ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Clouds
+            clouds.forEach(c => {
+                c.x -= c.s; if (c.x < -150) c.x = canvas.width + 100;
+                draw3DCloud(c.x, c.y, c.size);
+            });
+
+            // Bird Physics
+            velocity += gravity; birdY += velocity;
+            if (wingAngle < 0.6) wingAngle += 0.12; // Gravity pulls wings down
+            drawFloppyBird(80, birdY, velocity, Math.min(Math.PI/4, Math.max(-Math.PI/4, velocity * 0.1)));
+
+            // Pipes
+            if (frame % 100 === 0) {
+                let h = Math.random() * (canvas.height - 400) + 120;
+                pipes.push({ x: canvas.width, y: h, gap: 200, passed: false });
+            }
+
+            for (let i = pipes.length - 1; i >= 0; i--) {
+                pipes[i].x -= 4.5;
+                draw3DPipe(pipes[i].x, 0, pipes[i].y, true);
+                draw3DPipe(pipes[i].x, pipes[i].y + pipes[i].gap, 0, false);
+
+                // Collision
+                if (80 + 18 > pipes[i].x && 80 - 18 < pipes[i].x + 85) {
+                    if (birdY - 18 < pipes[i].y || birdY + 18 > pipes[i].y + pipes[i].gap) {
+                        gameRunning = false; playSfx(120, 40, 'square', 0.25, 0.3);
+                    }
+                }
+                if (pipes[i].x + 85 < 80 && !pipes[i].passed) { score++; pipes[i].passed = true; }
+                if (pipes[i].x < -100) pipes.splice(i, 1);
+            }
+
+            if (birdY > canvas.height || birdY < 0) { gameRunning = false; playSfx(100, 30, 'square', 0.2); }
+
+            // UI
+            ctx.fillStyle = "white"; ctx.textAlign = "center";
+            ctx.font = "bold 45px Arial"; ctx.fillText(score, canvas.width/2, 80);
+            ctx.font = "bold 16px Arial"; ctx.fillText("BEST: " + highScore, canvas.width/2, 110);
+            
+            // Mute Button
+            ctx.font = "30px Arial"; ctx.fillText(isMuted ? "🔇" : "🔊", muteBtn.x + 25, muteBtn.y + 35);
+
+            if (gameRunning) requestAnimationFrame(loop);
+            else showGameOver();
+        }
+
+        function showGameOver() {
+            if (score > highScore) { highScore = score; localStorage.setItem("f3d_high", highScore); }
+            ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.fillRect(0,0,canvas.width, canvas.height);
+            ctx.fillStyle = "white"; ctx.font = "bold 40px Arial";
+            ctx.fillText("CRASHED!", canvas.width/2, canvas.height/2);
+            ctx.font = "24px Arial"; ctx.fillText("TAP TO RESTART", canvas.width/2, canvas.height/2 + 60);
+        }
+
+        // --- INPUTS ---
+        window.addEventListener("touchstart", (e) => {
+            const tx = e.touches[0].clientX; const ty = e.touches[0].clientY;
+            
+            // Mute logic
+            if (tx > muteBtn.x && ty < muteBtn.y + muteBtn.size) {
+                isMuted = !isMuted; return;
+            }
+
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            
+            if (!gameRunning) {
+                birdY = canvas.height / 2; velocity = 0; pipes = []; score = 0; frame = 0; gameRunning = true; loop();
+            } else {
+                velocity = jump; wingAngle = -1.2;
+                playSfx(220, 750, 'triangle', 0.15);
+            }
+            e.preventDefault();
+        }, { passive: false });
+
+        loop();
+    </script>
+</body>
+</html>
